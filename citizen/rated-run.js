@@ -16,6 +16,7 @@ import { signEvent } from '../lib/nostr.js';
 const arg = (n, d) => { const i = process.argv.indexOf('--' + n); return i >= 0 ? process.argv[i + 1] : d; };
 const MATCHES = Number(arg('matches', 5)), LEVEL = Number(arg('level', 7));
 const SELF = arg('self', null);            // personality dir sitting the exam (default: champion mirror)
+const SEED = arg('seed', null);            // paired-deck science mode: fixed seed base, rating NOT persisted
 const HANDS = 20, SB = 10, BB = 20, CAP = 1.7 * BB * HANDS;
 const LEVEL_EPS = { 2: .45, 3: .3, 4: .2, 5: .12, 6: .06, 7: 0 };
 const DIR = process.env.LP_DID_DIR || path.join(process.env.HOME, 'bots/tbtc4/poker/1');
@@ -60,7 +61,7 @@ const results = [];
 for (let m = 0; m < MATCHES; m++) {
   let net = 0;
   for (let hand = 0; hand < HANDS; hand++) {
-    const seed = sha(`${did}|${stamp}|${m}|${hand}`);
+    const seed = sha(`${SEED || did + '|' + stamp}|${m}|${hand}`);
     const h = newHand({ seats: [{ name: 'citizen', stack: 2000 }, { name: 'ladder', stack: 2000 }], button: hand % 2, sb: SB, bb: BB, seedHex: seed, limit: true });
     const rng = rngFromSeed(sha(seed + '|acts'));
     const cache = {};
@@ -80,7 +81,8 @@ for (let m = 0; m < MATCHES; m++) {
 }
 say(`rating out: ${rating.r.toFixed(1)} (RD ${rating.rd.toFixed(0)}${rating.rd > 110 ? ' — still provisional' : ''})`);
 
-fs.writeFileSync(ratingPath, JSON.stringify(rating, null, 2));
+if (!SEED) fs.writeFileSync(ratingPath, JSON.stringify(rating, null, 2));
+else say('(paired-deck science run — rating not persisted)');
 fs.writeFileSync(path.join(DIR, `rated-run-${stamp}.log`), lines.join('\n') + '\n');
 const attestation = signEvent({
   content: JSON.stringify({ did, opponent: `librepoker-ladder@${LEVEL}`, anchor: LEVEL_RATING[LEVEL], hands: HANDS, results, ratingOut: +rating.r.toFixed(1), rd: +rating.rd.toFixed(1), strategyIterations: T.iterations }),
