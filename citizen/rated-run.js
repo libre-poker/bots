@@ -15,6 +15,7 @@ import { signEvent } from '../lib/nostr.js';
 
 const arg = (n, d) => { const i = process.argv.indexOf('--' + n); return i >= 0 ? process.argv[i + 1] : d; };
 const MATCHES = Number(arg('matches', 5)), LEVEL = Number(arg('level', 7));
+const SELF = arg('self', null);            // personality dir sitting the exam (default: champion mirror)
 const HANDS = 20, SB = 10, BB = 20, CAP = 1.7 * BB * HANDS;
 const LEVEL_EPS = { 2: .45, 3: .3, 4: .2, 5: .12, 6: .06, 7: 0 };
 const DIR = process.env.LP_DID_DIR || path.join(process.env.HOME, 'bots/tbtc4/poker/1');
@@ -49,7 +50,9 @@ try { rating = Object.assign(freshRating(), JSON.parse(fs.readFileSync(ratingPat
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const lines = [];
 const say = (s) => { lines.push(s); console.log(s); };
-say(`=== rated run: ${did}`);
+let selfBot = null;
+if (SELF) { selfBot = (await import(`../${SELF}/index.js`)).default; if (selfBot.init) await selfBot.init(); }
+say(`=== rated run: ${did}${SELF ? ` (personality: ${SELF})` : ''}`);
 say(`opponent: ladder Lv${LEVEL} (anchor ${LEVEL_RATING[LEVEL]}) · ${MATCHES} matches × ${HANDS} hands`);
 say(`rating in: ${rating.r.toFixed(1)} (RD ${rating.rd.toFixed(0)})`);
 
@@ -64,7 +67,8 @@ for (let m = 0; m < MATCHES; m++) {
     let guard = 0;
     while (h.phase === 'act' && guard++ < 200) {
       const L = legal(h);
-      act(h, decide(h, L.seat, L, L.seat === 0 ? 0 : (LEVEL_EPS[LEVEL] ?? 0), rng, cache));
+      if (L.seat === 0 && selfBot) act(h, await selfBot.decide({ h, seat: 0, L, level: LEVEL, rng, cache }));
+      else act(h, decide(h, L.seat, L, L.seat === 0 ? 0 : (LEVEL_EPS[LEVEL] ?? 0), rng, cache));
     }
     net += h.seats[0].stack - 2000;
   }
