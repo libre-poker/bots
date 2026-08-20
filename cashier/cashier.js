@@ -50,7 +50,7 @@ const saveLedger = () => fs.writeFileSync(LEDGER_FILE, JSON.stringify(ledger, nu
 
 async function onCashHand(c, signer) {
   if (signer !== USER_DID) return log(`cashhand from ${signer.slice(0, 16)} refused: not the player`);
-  if (!c.root || ledger.hands[c.root]) return log(`cashhand ${String(c.root).slice(0, 10)}: duplicate or rootless — ignored`);
+  if (!c.root || ledger.hands[c.root] !== undefined) return log(`cashhand ${String(c.root).slice(0, 10)}: duplicate or rootless — ignored`);
   const delta = Math.trunc(c.delta);
   if (!Number.isFinite(delta) || Math.abs(delta) > 2000) return log(`cashhand delta ${c.delta} out of bounds`);
   if (ledger.balances[CITIZEN_DID] - delta < 0 || ledger.balances[USER_DID] + delta < 0) return log('cashhand refused: insufficient balance');
