@@ -111,7 +111,7 @@ async function onDepositCheck(c, signer, wreq) {
   let credited = 0; const coins = [];
   for (const u of utxos) {
     const key = `${u.txid}:${u.vout}`;
-    if (!u.status?.confirmed || ledger.deposits[key] !== undefined) continue;
+    if (ledger.deposits[key] !== undefined) continue;   // 0-conf is fine: testnet sats
     ledger.deposits[key] = { uri, sats: u.value };
     credited += u.value; coins.push(key);
   }
