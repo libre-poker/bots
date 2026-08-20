@@ -39,7 +39,26 @@ trust    {claim:'trust-cashier', game, stake, cashier: <cashier DID>}
 deposit  {claim:'deposit', game, txid, vout}
 result   {claim:'result', game, handRoot, winner: <DID>, payoutAddress}
 withdraw {claim:'withdraw', game, amount, address}
+deposit-check {claim:'deposit-check'}
 ```
+
+`deposit-check` is the open door: **every nostr account has its own
+deposit address**, derived by the [webledgers](https://webledgers.org/)
+convention — `P = lift_x(cashierPub) + sha256(utf8(uri))·G`, then the
+BIP341 taptweak (`lib/webledger-address.js`; browser twin in
+`play/engine/wl-address.js`, parity-tested). The address is pure public
+computation from the cashier's DID and yours, so the page derives it with
+no server round-trip, and any auditor can recompute the mapping. Send
+testnet4 sats there from any wallet, then sign a `deposit-check`: the
+cashier derives the same address, credits confirmed coins it hasn't
+booked (once per `txid:vout`), and archives a signed `Ledger` credit.
+Only the cashier can spend the deposits (it alone can form the tweaked
+private key), so custody is unchanged — this fixes *attribution*, not
+custody.
+
+The book itself is a **WebLedger document** (JSON-LD, URI→satoshi
+entries), with `hands`, `withdrawals`, and `deposits` riding along as
+custom fields per the webledgers spec.
 
 `withdraw` is the standing-ledger exit: the player signs an amount and a
 destination, and the cashier — after checking the signature, the book

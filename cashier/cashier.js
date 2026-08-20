@@ -15,6 +15,8 @@ import { execSync } from 'node:child_process';
 import { makeClient } from '../lib/seat.js';
 import { signEvent, verifyEvent, derivePub } from '../lib/nostr.js';
 import { tweakPubkey, p2trAddress, scriptPubKeyFor, spkFromAddress, buildKeyPathSpend } from '../lib/taproot.js';
+import { depositAddressFor } from '../lib/webledger-address.js';
+import { loadBook } from './book.js';
 
 const DIR = process.env.LP_CASHIER_DIR || path.join(process.env.HOME, 'bots/tbtc4/poker/cashier');
 const BASE = process.env.LP_CROUPIER || 'https://melvin.me/croupier';
@@ -38,31 +40,24 @@ const log = (m) => console.log(`[cashier] ${m}`);
 // ---- the standing sat ledger: poker-for-sats balances, persisted ----
 const USER_DID = 'did:nostr:47779362edffcf683a6b277a71dd84651c5f7939e4daf84009a4144238b91a03';
 const CITIZEN_DID = 'did:nostr:455c405b9473a0f751c3166e3008411ce4fecb7fef217bbb8baaf5f535383a10';
-const LEDGER_FILE = path.join(DIR, 'ledger.json');
-let ledger;
-try { ledger = JSON.parse(fs.readFileSync(LEDGER_FILE, 'utf8')); }
-catch {
-  // seed: the 703,086-sat faucet deposit, 10,000 granted to the citizen
-  ledger = { seq: 0, balances: { [USER_DID]: 693086, [CITIZEN_DID]: 10000 }, hands: {} };
-  fs.writeFileSync(LEDGER_FILE, JSON.stringify(ledger, null, 2));
-}
-const saveLedger = () => fs.writeFileSync(LEDGER_FILE, JSON.stringify(ledger, null, 2));
+// seed (fresh book only): the 703,086-sat faucet deposit, 10,000 granted to the citizen
+const { book: ledger, save: saveLedger, bal, creditBal, balancesView } = loadBook(DIR, { [USER_DID]: 693086, [CITIZEN_DID]: 10000 });
 
 async function onCashHand(c, signer) {
   if (signer !== USER_DID) return log(`cashhand from ${signer.slice(0, 16)} refused: not the player`);
   if (!c.root || ledger.hands[c.root] !== undefined) return log(`cashhand ${String(c.root).slice(0, 10)}: duplicate or rootless — ignored`);
   const delta = Math.trunc(c.delta);
   if (!Number.isFinite(delta) || Math.abs(delta) > 2000) return log(`cashhand delta ${c.delta} out of bounds`);
-  if (ledger.balances[CITIZEN_DID] - delta < 0 || ledger.balances[USER_DID] + delta < 0) return log('cashhand refused: insufficient balance');
-  ledger.balances[USER_DID] += delta;
-  ledger.balances[CITIZEN_DID] -= delta;
+  if (bal(CITIZEN_DID) - delta < 0 || bal(USER_DID) + delta < 0) return log('cashhand refused: insufficient balance');
+  creditBal(USER_DID, delta);
+  creditBal(CITIZEN_DID, -delta);
   ledger.hands[c.root] = delta;
   ledger.seq++;
   saveLedger();
-  log(`hand ${c.root.slice(0, 10)}: ${delta >= 0 ? 'player wins ' + delta : 'citizen wins ' + (-delta)} sats · player ${ledger.balances[USER_DID]} · citizen ${ledger.balances[CITIZEN_DID]}`);
-  const doc = { type: 'Ledger', v: 0, root: `cash-${c.root}`, entry: 'handdelta', game: c.game, handRoot: c.root, delta, balances: { ...ledger.balances }, seq: ledger.seq, t: Date.now() };
+  log(`hand ${c.root.slice(0, 10)}: ${delta >= 0 ? 'player wins ' + delta : 'citizen wins ' + (-delta)} sats · player ${bal(USER_DID)} · citizen ${bal(CITIZEN_DID)}`);
+  const doc = { type: 'Ledger', v: 0, root: `cash-${c.root}`, entry: 'handdelta', game: c.game, handRoot: c.root, delta, balances: balancesView(), entries: ledger.entries, seq: ledger.seq, t: Date.now() };
   archive(doc);
-  await say({ type: 'cashier-ledger', game: c.game, handRoot: c.root, delta, balances: ledger.balances, seq: ledger.seq });
+  await say({ type: 'cashier-ledger', game: c.game, handRoot: c.root, delta, balances: balancesView(), seq: ledger.seq });
 }
 
 async function onWithdraw(c, signer, wreq) {
@@ -71,7 +66,7 @@ async function onWithdraw(c, signer, wreq) {
   if (!wreq || ledger.withdrawals[wreq]) return log('withdraw: duplicate or unidentified request — ignored');
   const amount = Math.trunc(c.amount);
   if (!Number.isFinite(amount) || amount < 1000) return log(`withdraw ${c.amount}: below the 1000-sat minimum`);
-  if (amount > ledger.balances[USER_DID]) return log(`withdraw ${amount}: exceeds book balance ${ledger.balances[USER_DID]}`);
+  if (amount > bal(USER_DID)) return log(`withdraw ${amount}: exceeds book balance ${bal(USER_DID)}`);
   let addrSpk;
   try { addrSpk = spkFromAddress(c.address); } catch { return log(`withdraw: unparseable address ${c.address}`); }
   const utxos = await fetch(`${MEMPOOL}/address/${vault}/utxo`).then((r) => r.json()).catch(() => null);
@@ -93,14 +88,41 @@ async function onWithdraw(c, signer, wreq) {
     log(`withdraw broadcast FAILED (book untouched): ${resp.slice(0, 160)}`);
     return say({ type: 'cashier-withdraw-failed', wreq, reason: resp.slice(0, 200) });
   }
-  ledger.balances[USER_DID] -= amount;
+  creditBal(USER_DID, -amount);
   ledger.withdrawals[wreq] = resp;
   ledger.seq++;
   saveLedger();
-  log(`withdraw: ${amount} sats to ${c.address} · tx ${resp} · player book ${ledger.balances[USER_DID]}`);
-  const doc = { type: 'Ledger', v: 0, root: `cashout-${resp}`, entry: 'withdraw', wreq, did: signer, amount, fee: FEE, address: c.address, txid: resp, balances: { ...ledger.balances }, seq: ledger.seq, t: Date.now() };
+  log(`withdraw: ${amount} sats to ${c.address} · tx ${resp} · player book ${bal(USER_DID)}`);
+  const doc = { type: 'Ledger', v: 0, root: `cashout-${resp}`, entry: 'withdraw', wreq, did: signer, amount, fee: FEE, address: c.address, txid: resp, balances: balancesView(), entries: ledger.entries, seq: ledger.seq, t: Date.now() };
   archive(doc);
-  await say({ type: 'cashier-withdraw', wreq, amount, address: c.address, txid: resp, balances: ledger.balances, seq: ledger.seq });
+  await say({ type: 'cashier-withdraw', wreq, amount, address: c.address, txid: resp, balances: balancesView(), seq: ledger.seq });
+}
+
+// deposit-check: your DID is your account. The page derives the same
+// address we do (cashier pubkey + sha256 of your DID URI — webledgers
+// convention) and nudges us when coins land; we credit what the chain
+// confirms, once per txid:vout, for ANY nostr account.
+async function onDepositCheck(c, signer, wreq) {
+  const uri = signer;
+  const { address } = depositAddressFor(pub, uri);
+  const utxos = await fetch(`${MEMPOOL}/address/${address}/utxo`).then((r) => r.json()).catch(() => null);
+  if (!Array.isArray(utxos)) return log(`deposit-check ${uri.slice(0, 20)}: chain unreachable`);
+  ledger.deposits = ledger.deposits || {};
+  let credited = 0; const coins = [];
+  for (const u of utxos) {
+    const key = `${u.txid}:${u.vout}`;
+    if (!u.status?.confirmed || ledger.deposits[key] !== undefined) continue;
+    ledger.deposits[key] = { uri, sats: u.value };
+    credited += u.value; coins.push(key);
+  }
+  if (!credited) return log(`deposit-check ${uri.slice(0, 20)}: nothing new at ${address}`);
+  creditBal(uri, credited);
+  ledger.seq++;
+  saveLedger();
+  log(`deposit: ${credited} sats credited to ${uri.slice(0, 20)} — ${coins.length} coin(s) at ${address} · book ${bal(uri)}`);
+  const doc = { type: 'Ledger', v: 0, root: `credit-${coins[0]}`, entry: 'credit', wreq, did: uri, address, coins, sats: credited, balances: balancesView(), entries: ledger.entries, seq: ledger.seq, t: Date.now() };
+  archive(doc);
+  await say({ type: 'cashier-credit', wreq, did: uri, address, sats: credited, balances: balancesView(), seq: ledger.seq });
 }
 
 const games = new Map();                            // game -> { stake, parties: Map<did, {deposit, result}> }
@@ -170,6 +192,7 @@ sse(`${BASE}/room/events?room=${ROOM}`, async (entry) => {
   try {
     if (c.claim === 'cashhand') await onCashHand(c, signer);
     else if (c.claim === 'withdraw') await onWithdraw(c, signer, m.attest.id);
+    else if (c.claim === 'deposit-check') await onDepositCheck(c, signer, m.attest.id);
     else if (c.claim === 'trust-cashier' && c.cashier === did) await onTrust(c, signer);
     else if (c.claim === 'deposit') await onDeposit(c, signer);
     else if (c.claim === 'result') await onResult(c, signer);
