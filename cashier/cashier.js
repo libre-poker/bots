@@ -15,7 +15,7 @@ import { execSync } from 'node:child_process';
 import { makeClient } from '../lib/seat.js';
 import { signEvent, verifyEvent, derivePub } from '../lib/nostr.js';
 import { tweakPubkey, p2trAddress, scriptPubKeyFor, spkFromAddress, buildKeyPathSpend } from '../lib/taproot.js';
-import { depositAddressFor } from '../lib/webledger-address.js';
+import { depositAddressFor, depositSeckeyFor } from '../lib/webledger-address.js';
 import { loadBook } from './book.js';
 
 const DIR = process.env.LP_CASHIER_DIR || path.join(process.env.HOME, 'bots/tbtc4/poker/cashier');
@@ -69,17 +69,33 @@ async function onWithdraw(c, signer, wreq) {
   if (amount > bal(USER_DID)) return log(`withdraw ${amount}: exceeds book balance ${bal(USER_DID)}`);
   let addrSpk;
   try { addrSpk = spkFromAddress(c.address); } catch { return log(`withdraw: unparseable address ${c.address}`); }
-  const utxos = await fetch(`${MEMPOOL}/address/${vault}/utxo`).then((r) => r.json()).catch(() => null);
-  if (!Array.isArray(utxos) || !utxos.length) return log('withdraw: vault utxos unreachable — try again later');
-  utxos.sort((a, b) => b.value - a.value);
+  // coins are gathered from the signer's own address first, then the vault,
+  // then the other accounts' addresses (all one custody — poker moves book
+  // balances without moving coins, so a big winner may draw on the pool)
+  const uriSource = (uri) => {
+    const d = depositAddressFor(pub, uri);
+    return { addr: d.address, spk: scriptPubKeyFor(d.outputX), key: depositSeckeyFor(priv, uri) };
+  };
+  const sources = [
+    uriSource(signer),
+    { addr: vault, spk: vaultSpk, key: null },
+    ...ledger.entries.filter((e) => e.url !== signer).map((e) => uriSource(e.url)),
+  ];
+  const pool = [];
+  for (const s of sources) {
+    const us = await fetch(`${MEMPOOL}/address/${s.addr}/utxo`).then((r) => r.json()).catch(() => []);
+    for (const u of (Array.isArray(us) ? us : [])) pool.push({ ...u, src: s });
+    if (pool.reduce((a, u) => a + u.value, 0) >= amount) break;
+  }
   const picked = []; let inSum = 0;
-  for (const u of utxos) { picked.push(u); inSum += u.value; if (inSum >= amount) break; }
-  if (inSum < amount) return log(`withdraw: vault holds ${inSum} on-chain < ${amount}`);
+  for (const u of pool) { picked.push(u); inSum += u.value; if (inSum >= amount) break; }
+  if (inSum < amount) return log(`withdraw: coins reachable on-chain ${inSum} < ${amount}`);
+  const signerAddr = sources[0].addr;
   const outputs = [{ spk: addrSpk, sats: amount - FEE }];
   const change = inSum - amount;
-  if (change >= 330) outputs.push({ spk: vaultSpk, sats: change }); // sub-dust change is left to the miner
+  if (change >= 330) outputs.push({ address: signerAddr, sats: change }); // sub-dust change is left to the miner
   const { rawHex } = buildKeyPathSpend({
-    inputs: picked.map((u) => ({ txid: u.txid, vout: u.vout, sats: u.value, spk: vaultSpk })),
+    inputs: picked.map((u) => ({ txid: u.txid, vout: u.vout, sats: u.value, spk: u.src.spk, tweakedPriv: u.src.key })),
     outputs,
     privHex: priv,
   });
@@ -90,6 +106,8 @@ async function onWithdraw(c, signer, wreq) {
   }
   creditBal(USER_DID, -amount);
   ledger.withdrawals[wreq] = resp;
+  ledger.deposits = ledger.deposits || {};
+  if (change >= 330) ledger.deposits[`${resp}:1`] = { uri: signer, sats: change, change: true }; // pre-book the change coin
   ledger.seq++;
   saveLedger();
   log(`withdraw: ${amount} sats to ${c.address} · tx ${resp} · player book ${bal(USER_DID)}`);
