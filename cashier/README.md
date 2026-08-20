@@ -38,7 +38,17 @@ archives; it authorizes nothing. There are three claims a party can make:
 trust    {claim:'trust-cashier', game, stake, cashier: <cashier DID>}
 deposit  {claim:'deposit', game, txid, vout}
 result   {claim:'result', game, handRoot, winner: <DID>, payoutAddress}
+withdraw {claim:'withdraw', game, amount, address}
 ```
+
+`withdraw` is the standing-ledger exit: the player signs an amount and a
+destination, and the cashier — after checking the signature, the book
+balance, and the address — builds a taproot key-path spend from the vault
+(change back to the vault), broadcasts it, debits the book, and archives
+a signed `Ledger` document naming the txid. Deduplicated by the signed
+event's id, persisted in `ledger.json`. The flat miner fee comes out of
+the withdrawn amount. The book is only debited after a successful
+broadcast — a failed broadcast leaves the balance untouched.
 
 And the cashier's lifecycle for a two-party, winner-takes-all game:
 
