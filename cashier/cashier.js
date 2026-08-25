@@ -43,30 +43,33 @@ const CITIZEN_DID = 'did:nostr:455c405b9473a0f751c3166e3008411ce4fecb7fef217bbb8
 // seed (fresh book only): the 703,086-sat faucet deposit, 10,000 granted to the citizen
 const { book: ledger, save: saveLedger, bal, creditBal, balancesView } = loadBook(DIR, { [USER_DID]: 693086, [CITIZEN_DID]: 10000 });
 
+const STAKE = 2000;                                 // one table stack: a hand books only for accounts that could cover it
 async function onCashHand(c, signer) {
-  if (signer !== USER_DID) return log(`cashhand from ${signer.slice(0, 16)} refused: not the player`);
+  if (signer === CITIZEN_DID) return log('cashhand refused: the citizen cannot settle against itself');
   if (!c.root || ledger.hands[c.root] !== undefined) return log(`cashhand ${String(c.root).slice(0, 10)}: duplicate or rootless — ignored`);
   const delta = Math.trunc(c.delta);
-  if (!Number.isFinite(delta) || Math.abs(delta) > 2000) return log(`cashhand delta ${c.delta} out of bounds`);
-  if (bal(CITIZEN_DID) - delta < 0 || bal(USER_DID) + delta < 0) return log('cashhand refused: insufficient balance');
-  creditBal(USER_DID, delta);
+  if (!Number.isFinite(delta) || Math.abs(delta) > STAKE) return log(`cashhand delta ${c.delta} out of bounds`);
+  // no freerolls: the signer must hold a full stack on the book — wins from
+  // an account that could never have paid its losses do not exist
+  if (bal(signer) < STAKE) return log(`cashhand from ${signer.slice(0, 20)} refused: book ${bal(signer)} < stake ${STAKE} — deposit first`);
+  if (bal(CITIZEN_DID) - delta < 0 || bal(signer) + delta < 0) return log('cashhand refused: insufficient balance');
+  creditBal(signer, delta);
   creditBal(CITIZEN_DID, -delta);
   ledger.hands[c.root] = delta;
   ledger.seq++;
   saveLedger();
-  log(`hand ${c.root.slice(0, 10)}: ${delta >= 0 ? 'player wins ' + delta : 'citizen wins ' + (-delta)} sats · player ${bal(USER_DID)} · citizen ${bal(CITIZEN_DID)}`);
+  log(`hand ${c.root.slice(0, 10)}: ${delta >= 0 ? 'player wins ' + delta : 'citizen wins ' + (-delta)} sats · ${signer.slice(0, 20)} ${bal(signer)} · citizen ${bal(CITIZEN_DID)}`);
   const doc = { type: 'Ledger', v: 0, root: `cash-${c.root}`, entry: 'handdelta', game: c.game, handRoot: c.root, delta, balances: balancesView(), entries: ledger.entries, seq: ledger.seq, t: Date.now() };
   archive(doc);
   await say({ type: 'cashier-ledger', game: c.game, handRoot: c.root, delta, balances: balancesView(), seq: ledger.seq });
 }
 
 async function onWithdraw(c, signer, wreq) {
-  if (signer !== USER_DID) return log(`withdraw from ${signer.slice(0, 16)} refused: not the player`);
   ledger.withdrawals = ledger.withdrawals || {};
   if (!wreq || ledger.withdrawals[wreq]) return log('withdraw: duplicate or unidentified request — ignored');
   const amount = Math.trunc(c.amount);
   if (!Number.isFinite(amount) || amount < 1000) return log(`withdraw ${c.amount}: below the 1000-sat minimum`);
-  if (amount > bal(USER_DID)) return log(`withdraw ${amount}: exceeds book balance ${bal(USER_DID)}`);
+  if (amount > bal(signer)) return log(`withdraw ${amount} from ${signer.slice(0, 20)}: exceeds book balance ${bal(signer)}`);
   let addrSpk;
   try { addrSpk = spkFromAddress(c.address); } catch { return log(`withdraw: unparseable address ${c.address}`); }
   // coins are gathered from the signer's own address first, then the vault,
@@ -104,13 +107,13 @@ async function onWithdraw(c, signer, wreq) {
     log(`withdraw broadcast FAILED (book untouched): ${resp.slice(0, 160)}`);
     return say({ type: 'cashier-withdraw-failed', wreq, reason: resp.slice(0, 200) });
   }
-  creditBal(USER_DID, -amount);
+  creditBal(signer, -amount);
   ledger.withdrawals[wreq] = resp;
   ledger.deposits = ledger.deposits || {};
   if (change >= 330) ledger.deposits[`${resp}:1`] = { uri: signer, sats: change, change: true }; // pre-book the change coin
   ledger.seq++;
   saveLedger();
-  log(`withdraw: ${amount} sats to ${c.address} · tx ${resp} · player book ${bal(USER_DID)}`);
+  log(`withdraw: ${amount} sats to ${c.address} · tx ${resp} · ${signer.slice(0, 20)} book ${bal(signer)}`);
   const doc = { type: 'Ledger', v: 0, root: `cashout-${resp}`, entry: 'withdraw', wreq, did: signer, amount, fee: FEE, address: c.address, txid: resp, balances: balancesView(), entries: ledger.entries, seq: ledger.seq, t: Date.now() };
   archive(doc);
   await say({ type: 'cashier-withdraw', wreq, amount, address: c.address, txid: resp, balances: balancesView(), seq: ledger.seq });
