@@ -220,6 +220,22 @@ sse(`${BASE}/room/events?room=${ROOM}`, async (entry) => {
   } catch (e) { log(`error handling ${c.claim}: ${e.message}`); }
 });
 
+// ---- the lobby hears us: a signed Table announcement, refreshed as a
+// heartbeat — if this process dies, the table goes stale on lobby.html
+// and nobody sits down at a table where hands cannot settle.
+function announceTable() {
+  archive({
+    type: 'Table', v: 0, root: 'table-cash-testnet4',
+    name: 'The cash table', url: 'https://librepoker.org/play/cash.html',
+    game: 'holdem-limit', stakes: '10/20 · sats (testnet4)', room: ROOM,
+    host: did, seats: 'heads-up vs the citizen',
+    note: 'poker for sats: deposit at your own address, play, withdraw on-chain',
+    t: Date.now(),
+  });
+}
+announceTable();
+setInterval(announceTable, 5 * 60 * 1000);
+
 log(`open for business as ${did}`);
 log(`vault (testnet4): ${vault}`);
 log(`watching room ${ROOM} at ${BASE} · chain via ${MEMPOOL}`);
